@@ -1,0 +1,6 @@
+{
+  "name": "Synthetic Debate Arena",
+  "description": "An AI agent debate arena with dual personality configuration, supporting Google API, OpenRouter, and local Ollama inference.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
