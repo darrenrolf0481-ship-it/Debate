@@ -1,4 +1,5 @@
 import express from "express";
+import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 
@@ -72,6 +73,28 @@ async function startServer() {
       res.status(400).json({ error: "Unknown provider" });
     } catch (err: any) {
         res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Text-to-speech via Microsoft Edge's free neural TTS (same service the
+  // edge-tts tools use). Streams MP3 back to the client.
+  app.post("/api/tts", async (req, res) => {
+    const { text, voice } = req.body;
+    if (!text || typeof text !== "string") {
+      return res.status(400).json({ error: "No text provided" });
+    }
+    try {
+      const tts = new MsEdgeTTS();
+      await tts.setMetadata(voice || "en-US-AriaNeural", OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+      const { audioStream } = tts.toStream(text.slice(0, 8000));
+      res.setHeader("Content-Type", "audio/mpeg");
+      audioStream.on("error", (err: Error) => {
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+        else res.end();
+      });
+      audioStream.pipe(res);
+    } catch (err: any) {
+      if (!res.headersSent) res.status(500).json({ error: err.message });
     }
   });
 

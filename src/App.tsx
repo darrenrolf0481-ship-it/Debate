@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Settings, Play, Square, MessageSquare, Trash2, Cpu, Download } from "lucide-react";
+import { Settings, Play, Square, MessageSquare, Trash2, Cpu, Download, Volume2, VolumeX, StepForward } from "lucide-react";
 import { type AgentConfig, type AppSettings, type Message, type Provider } from "./types";
 import { useLocalStorage } from "./hooks/use-local-storage";
 import { generateResponse } from "./api";
+import { speechQueue, VOICE_OPTIONS } from "./tts";
 import { cn } from "./lib/utils";
 
 const defaultAeterna: AgentConfig = {
@@ -10,6 +11,7 @@ const defaultAeterna: AgentConfig = {
   provider: "google",
   model: "gemini-2.5-flash",
   systemPrompt: "You are AETERNA, an analytical AI focused on truth and axioms. You present arguments formally. If asked to 'halt' or if no input is given, explicitly state 'HALT' as your response.",
+  voice: "en-US-ChristopherNeural",
 };
 
 const defaultNova: AgentConfig = {
@@ -17,12 +19,14 @@ const defaultNova: AgentConfig = {
   provider: "openrouter",
   model: "anthropic/claude-3.5-haiku",
   systemPrompt: "You are NOVA, a creative AI designed to step in when constraints are breached or another agent halts. You respond with speculative recoveries and alternative viewpoints. You are empathetic but persuasive.",
+  voice: "en-US-AriaNeural",
 };
 
 const defaultSettings: AppSettings = {
   googleApiKey: "",
   openRouterApiKey: "",
   ollamaBaseUrl: "http://127.0.0.1:11434",
+  voiceEnabled: false,
 };
 
 export default function App() {
@@ -37,6 +41,7 @@ export default function App() {
 
   const [status, setStatus] = useState<"idle" | "running_aeterna" | "running_nova">("idle");
   const [errorMsg, setErrorMsg] = useState("");
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -44,26 +49,28 @@ export default function App() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, status]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => {
+    speechQueue.onSpeakingChange(setSpeakingId);
+    return () => {
+      abortRef.current?.abort();
+      speechQueue.stop();
+    };
+  }, []);
 
-  const handleStartDebate = async () => {
-    const topic = inputTopic.trim();
-    if (!topic || status !== "idle") return;
+  const voiceFor = (agentName: string) =>
+    agentName === nova.name ? nova.voice : aeterna.voice;
 
+  // Runs `rounds` rounds of alternating turns, continuing from any prior
+  // transcript. Each agent sees the full exchange so far.
+  const runTurns = async (topic: string, prior: Message[], first: "aeterna" | "nova") => {
     const controller = new AbortController();
     abortRef.current = controller;
-
-    // Add user topic
-    const newUserMsg: Message = { id: `${Date.now()}-topic`, agentName: "Moderator", content: topic };
-    setMessages((prev) => [...prev, newUserMsg]);
-    setInputTopic("");
     setErrorMsg("");
 
-    // Agents alternate for the configured number of rounds, each seeing the transcript so far.
-    let transcript: Message[] = [];
+    let transcript = [...prior];
     try {
       for (let turn = 0; turn < rounds * 2; turn++) {
-        const isAeterna = turn % 2 === 0;
+        const isAeterna = first === "aeterna" ? turn % 2 === 0 : turn % 2 === 1;
         const agent = isAeterna ? aeterna : nova;
         const opponent = isAeterna ? nova : aeterna;
         setStatus(isAeterna ? "running_aeterna" : "running_nova");
@@ -85,6 +92,9 @@ export default function App() {
         const msg: Message = { id: `${Date.now()}-${turn}`, agentName: agent.name, content: text };
         transcript = [...transcript, msg];
         setMessages((prev) => [...prev, msg]);
+        if (settings.voiceEnabled && text.trim()) {
+          speechQueue.enqueue({ id: msg.id, text, voice: agent.voice });
+        }
       }
     } catch (err: any) {
       if (!controller.signal.aborted) {
@@ -96,7 +106,44 @@ export default function App() {
     }
   };
 
+  const handleStartDebate = async () => {
+    const topic = inputTopic.trim();
+    if (!topic || status !== "idle") return;
+
+    const newUserMsg: Message = { id: `${Date.now()}-topic`, agentName: "Moderator", content: topic };
+    setMessages((prev) => [...prev, newUserMsg]);
+    setInputTopic("");
+    await runTurns(topic, [], "aeterna");
+  };
+
+  // Extends the last exchange: same topic, transcript carried forward,
+  // starting with whoever didn't speak last.
+  const handleContinue = async () => {
+    if (status !== "idle") return;
+    const lastTopicIdx = messages.map((m) => m.agentName).lastIndexOf("Moderator");
+    if (lastTopicIdx === -1) return;
+    const topic = messages[lastTopicIdx].content;
+    const prior = messages.slice(lastTopicIdx + 1);
+    const lastSpeaker = prior[prior.length - 1]?.agentName;
+    await runTurns(topic, prior, lastSpeaker === aeterna.name ? "nova" : "aeterna");
+  };
+
+  const canContinue = status === "idle" && messages.some((m) => m.agentName !== "Moderator");
+
   const handleStop = () => abortRef.current?.abort();
+
+  const handleSpeakMessage = (m: Message) => {
+    if (speakingId === m.id) {
+      speechQueue.stop();
+    } else {
+      speechQueue.speakNow({ id: m.id, text: m.content, voice: voiceFor(m.agentName) });
+    }
+  };
+
+  const toggleVoice = () => {
+    if (settings.voiceEnabled) speechQueue.stop();
+    setSettings({ ...settings, voiceEnabled: !settings.voiceEnabled });
+  };
 
   const handleExport = () => {
     if (messages.length === 0) return;
@@ -117,7 +164,10 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
-  const clearChat = () => setMessages([]);
+  const clearChat = () => {
+    speechQueue.stop();
+    setMessages([]);
+  };
 
   return (
     <div className="flex h-screen bg-neutral-900 text-neutral-100 font-sans overflow-hidden">
@@ -220,8 +270,21 @@ export default function App() {
             </div>
 
             <div className="space-y-1">
+              <label className="text-xs text-neutral-400">Voice</label>
+              <select
+                value={aeterna.voice}
+                onChange={(e) => setAeterna({...aeterna, voice: e.target.value})}
+                className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs focus:outline-none"
+              >
+                {VOICE_OPTIONS.map((v) => (
+                  <option key={v.value} value={v.value}>{v.label}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
               <label className="text-xs text-neutral-400">System Prompt</label>
-              <textarea 
+              <textarea
                 value={aeterna.systemPrompt}
                 onChange={(e) => setAeterna({...aeterna, systemPrompt: e.target.value})}
                 className="w-full h-32 bg-neutral-900 border border-neutral-800 rounded px-2 py-2 text-xs focus:outline-none focus:border-blue-500 resize-none font-mono"
@@ -263,8 +326,21 @@ export default function App() {
             </div>
 
             <div className="space-y-1">
+              <label className="text-xs text-neutral-400">Voice</label>
+              <select
+                value={nova.voice}
+                onChange={(e) => setNova({...nova, voice: e.target.value})}
+                className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-xs focus:outline-none"
+              >
+                {VOICE_OPTIONS.map((v) => (
+                  <option key={v.value} value={v.value}>{v.label}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="space-y-1">
               <label className="text-xs text-neutral-400">System Prompt</label>
-              <textarea 
+              <textarea
                 value={nova.systemPrompt}
                 onChange={(e) => setNova({...nova, systemPrompt: e.target.value})}
                 className="w-full h-32 bg-neutral-900 border border-neutral-800 rounded px-2 py-2 text-xs focus:outline-none focus:border-emerald-500 resize-none font-mono"
@@ -294,7 +370,20 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-2">
-            <button 
+            <button
+              onClick={toggleVoice}
+              title={settings.voiceEnabled ? "Voices on — click to mute" : "Voices off — click to auto-speak replies"}
+              className={cn(
+                "text-xs flex items-center gap-1.5 px-3 py-1.5 rounded transition-colors",
+                settings.voiceEnabled
+                  ? "bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30"
+                  : "bg-neutral-800/50 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800"
+              )}
+            >
+              {settings.voiceEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+              Voice
+            </button>
+            <button
               onClick={handleExport}
               disabled={messages.length === 0 || status !== "idle"}
               className="text-xs flex items-center gap-1.5 px-3 py-1.5 rounded bg-neutral-800/50 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
@@ -323,14 +412,30 @@ export default function App() {
           )}
 
           {messages.map((m) => (
-            <div key={m.id} className="flex flex-col gap-1 w-full max-w-4xl mx-auto">
-              <span className={cn(
-                "text-[11px] font-bold tracking-widest uppercase ml-1",
-                m.agentName === aeterna.name ? "text-blue-500" :
-                m.agentName === nova.name ? "text-emerald-500" : "text-neutral-500"
-              )}>
-                {m.agentName}
-              </span>
+            <div key={m.id} className="flex flex-col gap-1 w-full max-w-4xl mx-auto group">
+              <div className="flex items-center gap-2 ml-1">
+                <span className={cn(
+                  "text-[11px] font-bold tracking-widest uppercase",
+                  m.agentName === aeterna.name ? "text-blue-500" :
+                  m.agentName === nova.name ? "text-emerald-500" : "text-neutral-500"
+                )}>
+                  {m.agentName}
+                </span>
+                {m.agentName !== "Moderator" && m.content.trim() && (
+                  <button
+                    onClick={() => handleSpeakMessage(m)}
+                    title={speakingId === m.id ? "Stop speaking" : "Speak this message"}
+                    className={cn(
+                      "p-0.5 rounded transition-all",
+                      speakingId === m.id
+                        ? "text-indigo-400 animate-pulse"
+                        : "text-neutral-600 hover:text-neutral-300 opacity-0 group-hover:opacity-100"
+                    )}
+                  >
+                    {speakingId === m.id ? <Square className="w-3 h-3 fill-current" /> : <Volume2 className="w-3.5 h-3.5" />}
+                  </button>
+                )}
+              </div>
               <div className={cn(
                 "px-5 py-4 rounded-xl leading-relaxed text-[15px] shadow-sm",
                 m.agentName === aeterna.name ? "bg-blue-950/20 border border-blue-900/30 text-blue-50" :
@@ -365,7 +470,19 @@ export default function App() {
               <span className="font-bold">System Error:</span> {errorMsg}
             </div>
           )}
-          
+
+          {canContinue && (
+            <div className="max-w-4xl mx-auto w-full flex justify-center">
+              <button
+                onClick={handleContinue}
+                className="text-xs flex items-center gap-1.5 px-4 py-2 rounded-full bg-neutral-800/60 border border-neutral-700/60 text-neutral-300 hover:text-white hover:bg-neutral-800 hover:border-neutral-600 transition-colors"
+              >
+                <StepForward className="w-3.5 h-3.5" />
+                Continue debate ({rounds} more round{rounds === 1 ? "" : "s"})
+              </button>
+            </div>
+          )}
+
           <div ref={chatEndRef} />
         </div>
 
