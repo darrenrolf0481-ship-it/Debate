@@ -5,12 +5,14 @@ export interface AgentConfig {
   provider: Provider;
   systemPrompt: string;
   model: string; // The model to use
+  voice: string; // Edge TTS neural voice, e.g. "en-US-AriaNeural"
 }
 
 export interface AppSettings {
   googleApiKey: string;
   openRouterApiKey: string;
   ollamaBaseUrl: string;
+  voiceEnabled: boolean; // Auto-speak agent replies
 }
 
 export interface Message {
