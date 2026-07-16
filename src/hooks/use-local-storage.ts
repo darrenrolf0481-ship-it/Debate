@@ -7,7 +7,17 @@ export function useLocalStorage<T>(key: string, initialValue: T) {
     }
     try {
       const item = window.localStorage.getItem(key);
-      return item ? JSON.parse(item) : initialValue;
+      if (!item) return initialValue;
+      const parsed = JSON.parse(item);
+      // Merge plain objects so values saved by an older app version
+      // still pick up fields added later, instead of leaving them undefined.
+      if (
+        parsed && typeof parsed === "object" && !Array.isArray(parsed) &&
+        initialValue && typeof initialValue === "object" && !Array.isArray(initialValue)
+      ) {
+        return { ...initialValue, ...parsed };
+      }
+      return parsed;
     } catch (error) {
       console.warn(`Error reading localStorage key "${key}":`, error);
       return initialValue;

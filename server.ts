@@ -4,7 +4,8 @@ import { createServer as createViteServer } from "vite";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Cloud Run / AI Studio inject the port to listen on; 3000 is the local fallback.
+  const PORT = parseInt(process.env.PORT || "3000", 10);
 
   app.use(express.json());
 
@@ -14,8 +15,11 @@ async function startServer() {
     
     try {
       if (provider === "google") {
-          const m = model || "gemini-1.5-pro";
-          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`, {
+          const m = model || "gemini-2.5-flash";
+          // AI Studio injects GEMINI_API_KEY server-side, so a key pasted in the UI is optional.
+          const key = apiKey || process.env.GEMINI_API_KEY;
+          if (!key) return res.status(400).json({ error: "No Google API key provided and GEMINI_API_KEY is not set on the server." });
+          const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${key}`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({

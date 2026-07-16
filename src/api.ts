@@ -1,9 +1,17 @@
 import { AgentConfig, AppSettings } from "./types";
 
+function extractError(data: any, fallback: string): string {
+  const err = data?.error;
+  if (typeof err === "string") return err;
+  if (err?.message) return err.message;
+  return fallback;
+}
+
 export async function generateResponse(
   prompt: string,
   config: AgentConfig,
-  settings: AppSettings
+  settings: AppSettings,
+  signal?: AbortSignal
 ): Promise<string> {
   if (config.provider === "ollama") {
     // Direct client fetch so localhost resolves to the user's machine running Ollama
@@ -17,9 +25,11 @@ export async function generateResponse(
         system: config.systemPrompt,
         stream: false
       }),
+      signal,
     });
     if (!res.ok) {
-      throw new Error(`Ollama fetch failed: HTTP ${res.status}`);
+      const data = await res.json().catch(() => ({}));
+      throw new Error(extractError(data, `Ollama fetch failed: HTTP ${res.status}`));
     }
     const json = await res.json();
     return json.response || "";
@@ -41,11 +51,12 @@ export async function generateResponse(
       apiKey,
       baseUrl: settings.ollamaBaseUrl,
     }),
+    signal,
   });
 
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `HTTP error ${res.status}`);
+    throw new Error(extractError(data, `HTTP error ${res.status}`));
   }
 
   const json = await res.json();
